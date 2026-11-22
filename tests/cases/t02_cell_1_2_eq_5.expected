@@ -1,0 +1,5 @@
+Row check: FAIL (rows: 1)
+Column check: FAIL (columns: 2)
+3x3 subgrid 1: FAIL
+3x3 subgrid 2: PASS
+Sudoku result: INVALID

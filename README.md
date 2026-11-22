@@ -65,8 +65,8 @@ Thread бүр өөрийн хариуцсан хэсгийг шалгаж, үр 
 ### 6.1. Windows хувилбар
 
 1. [GitHub Releases](https://github.com/Naidan2006/sudoku-validator/releases) хуудас руу орно.
-2. Хамгийн сүүлийн хувилбарыг сонгоно.
-3. `Assets` хэсгээс Windows-д зориулсан ZIP багцыг татна.
+2. Хувилбарыг сонгоно. Windows болон Linux багц нэг Release-д хамт байрлана (`v1.0.3`-аас эхлэн, tag-ийн эх кодоос GitHub Actions-аар бүтээгддэг).
+3. `Assets` хэсгээс `Sudoku-Validator-Windows.zip` багцыг татна. (`v1.0.2` Release-д Windows ZIP байхгүй, зөвхөн `v1.0.1`-д бий.)
 4. Архивыг задална.
 5. `sudoku_gui.exe` файлыг ажиллуулна.
 
@@ -127,7 +127,22 @@ gcc gui.c sudoku_core.c -o sudoku_gui \
 ./sudoku_gui
 ```
 
-Эдгээр команд нь эх кодын файлууд репозиторын үндсэн хавтаст байрлаж байгаа нөхцөлд зориулагдсан. Консолын хувилбарыг хөрвүүлэх команд болон шаардлагатай тохиргоог эх кодын бодит бүтэцтэй тулгана.
+Консолын хувилбарыг хөрвүүлэх (GTK шаардлагагүй). Консол ба GUI нь адил `sudoku_core.c`-г ашиглана:
+
+```bash
+gcc -Wall -Wextra -pthread main.c sudoku_core.c -o sudoku_validator
+./sudoku_validator
+```
+
+Эсвэл `make` ашиглаж болно:
+
+```bash
+make            # sudoku_validator ба sudoku_gui хоёуланг бүтээнэ
+make test       # автомат тест ажиллуулна
+make clean
+```
+
+Windows дээр MSYS2 (MINGW64) орчинд `mingw-w64-x86_64-gcc`, `mingw-w64-x86_64-gtk3`, `mingw-w64-x86_64-pkgconf` суулгаад дээрх `gcc` командыг ижил хэлбэрээр ашиглана (`-o sudoku_gui.exe`).
 
 ## 8. Тест ба баталгаажуулалт
 
@@ -142,17 +157,30 @@ gcc gui.c sudoku_core.c -o sudoku_gui \
 | Хоосон нүд | Хоосон оролтыг програм хэрхэн боловсруулах |
 | Буруу оролт | Зөвшөөрөгдөөгүй утгыг зөв боловсруулах эсэх |
 
-Тест бүрийн хүлээгдэж буй үр дүнг програмын бодит үр дүнтэй харьцуулж, илэрсэн алдаа болон засварыг баримтжуулна.
+Тест бүрийн оролт нь `tests/cases/*.in`, хүлээгдэж буй гаралтын мөрүүд нь `tests/cases/*.expected` файлд байна. Консол хувилбарыг автоматаар шалгах:
+
+```bash
+make test
+# эсвэл
+tests/run_tests.sh ./sudoku_validator
+```
+
+Тестэд зөв хүснэгт, мөр/багана/дэд хүснэгтийн давхардал (аль мөр, багана FAIL болсон нь гарна), хүрээнээс гадуурх утга (`0`, `10`, `-1`, `4294967301`), дутуу/илүү тоо, үсэг, дахин шалгах горим, оролт дутуу дуусах тохиолдлууд орсон. Эдгээрийг GitHub Actions (`build.yml`) push бүрт ажиллуулна.
 
 ## 9. Репозиторын бүтэц
 
 ```text
 sudoku-validator/
 ├── .github/
-│   └── workflows/
+│   └── workflows/        # build.yml (build + тест), release.yml
 ├── docs/
+│   ├── Manual.pdf
 │   └── screenshots/
+├── packaging/            # README-LINUX.txt (release багцад орно)
 ├── tests/
+│   ├── cases/            # *.in оролт, *.expected хүлээгдсэн гаралт
+│   └── run_tests.sh
+├── Makefile
 ├── main.c
 ├── gui.c
 ├── sudoku_core.c
@@ -163,19 +191,24 @@ sudoku-validator/
 
 | Файл, хавтас | Тайлбар |
 |---|---|
-| `main.c` | Консолын хувилбарын үндсэн код |
+| `main.c` | Консолын хувилбар (оролт/гаралт). Шалгалтыг `sudoku_core.c`-ээр хийнэ |
 | `gui.c` | График интерфэйсийн код |
-| `sudoku_core.c` | Судоку шалгах үндсэн логик |
+| `sudoku_core.c` | Судоку шалгах 11 thread-ийн логик (консол, GUI хоёрт нийтлэг) |
 | `sudoku_core.h` | Үндсэн логикийн функцийн зарлалууд |
 | `.github/workflows/` | GitHub Actions-ийн тохиргоо |
 | `docs/` | Гарын авлага болон баримтжуулалт |
 | `docs/screenshots/` | Дэлгэцийн зургууд |
-| `tests/` | Тестийн материал |
+| `tests/` | Автомат тестийн оролт, хүлээгдсэн гаралт, `run_tests.sh` |
+| `Makefile` | `make`, `make test`, `make clean` |
+| `packaging/` | Release багцад орох файлууд |
 | `main.tex` | Төслийн тайлангийн LaTeX эх файл |
 
 ## 10. Автомат бүтээх процесс
 
-Төсөлд GitHub Actions ашиглан эх кодыг автоматаар хөрвүүлэх болон бүтээх явцад алдаа байгаа эсэхийг шалгах боломжтой.
+Төсөлд GitHub Actions ашиглан:
+
+- `build.yml` — push, pull request бүрт консол ба GUI хувилбарыг `-Wall -Wextra -Werror`-оор хөрвүүлж, `tests/run_tests.sh`-г ажиллуулна (warning эсвэл тест унавал CI унана).
+- `release.yml` — `v*` tag push хийхэд tag-ийн эх кодоос Linux tar.gz болон Windows ZIP багцыг бүтээж, нэг Release-д хамт байрлуулна. Ингэснээр Release-ийн binary үргэлж repo-д байгаа эх кодтой таарна.
 
 Workflow-ийн ажиллагаа болон үр дүнг GitHub репозиторын `Actions` хэсгээс харна.
 

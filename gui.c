@@ -7,6 +7,9 @@ static GtkWidget *status_label;
 static GtkWidget *result_label;
 static GtkWidget *sudoku_grid;
 static GtkWidget *page_stack;
+static GtkWidget *thread_labels[TOTAL_THREADS];
+static GtkWidget *thread_time_label;
+static gboolean suppress_changed = FALSE;
 
 /* Dynamic CSS for cell font size (changes when the window is resized) */
 static GtkCssProvider *cell_css;
@@ -157,6 +160,19 @@ static void setup_css(void)
         ".block-b { background-color: #E4F4E7; color: #183153; }"
         ".block-c { background-color: #FFF0D5; color: #183153; }"
 
+        "entry.sudoku-cell.cell-fail {"
+        " background-color: #FECACA;"
+        " color: #991B1B;"
+        "}"
+
+        ".thread-line {"
+        " color: #24364B;"
+        " font-size: 13px;"
+        "}"
+
+        ".thread-pass { color: #065F46; }"
+        ".thread-fail { color: #991B1B; font-weight: bold; }"
+
         "entry.sudoku-cell:focus {"
         " background-color: #FFF3A6;"
         " border: 2px solid #174EA6;"
@@ -279,6 +295,142 @@ static void on_grid_size_allocate(
     }
 }
 
+/* ---------- Thread panel + result state ---------- */
+
+static const char *thread_name(int index, char *buf, size_t size)
+{
+    if (index == 0)
+        g_snprintf(buf, size, "Thread 1 — Мөр шалгах");
+    else if (index == 1)
+        g_snprintf(buf, size, "Thread 2 — Багана шалгах");
+    else
+        g_snprintf(buf, size, "Thread %d — Дэд хүснэгт %d",
+                   index + 1, index - 1);
+
+    return buf;
+}
+
+static void refresh_thread_panel(void)
+{
+    for (int i = 0; i < TOTAL_THREADS; i++) {
+        char name[64];
+        char line[128];
+        const char *text;
+        const char *css = NULL;
+
+        switch (get_thread_status(i)) {
+        case THREAD_RUNNING: text = "ажиллаж байна"; break;
+        case THREAD_PASS:    text = "PASS — Амжилттай"; css = "thread-pass"; break;
+        case THREAD_FAIL:    text = "FAIL — Алдаатай"; css = "thread-fail"; break;
+        case THREAD_ERROR:   text = "ERROR — эхлэх боломжгүй"; css = "thread-fail"; break;
+        default:             text = "Хүлээж байна"; break;
+        }
+
+        g_snprintf(line, sizeof(line), "%s: %s",
+                   thread_name(i, name, sizeof(name)), text);
+
+        GtkStyleContext *ctx =
+            gtk_widget_get_style_context(thread_labels[i]);
+
+        gtk_style_context_remove_class(ctx, "thread-pass");
+        gtk_style_context_remove_class(ctx, "thread-fail");
+
+        if (css != NULL)
+            gtk_style_context_add_class(ctx, css);
+
+        gtk_label_set_text(GTK_LABEL(thread_labels[i]), line);
+    }
+
+    if (last_validation_ms > 0.0) {
+        char t[96];
+
+        g_snprintf(t, sizeof(t), "Нийт хугацаа: %.3f мс (wall time)",
+                   last_validation_ms);
+        gtk_label_set_text(GTK_LABEL(thread_time_label), t);
+    } else {
+        gtk_label_set_text(GTK_LABEL(thread_time_label), "Нийт хугацаа: —");
+    }
+}
+
+static void clear_fail_highlight(void)
+{
+    for (int row = 0; row < SIZE; row++) {
+        for (int col = 0; col < SIZE; col++) {
+            GtkWidget *entry = gtk_grid_get_child_at(
+                GTK_GRID(sudoku_grid), col, row
+            );
+
+            if (entry != NULL) {
+                gtk_style_context_remove_class(
+                    gtk_widget_get_style_context(entry), "cell-fail"
+                );
+            }
+        }
+    }
+}
+
+/* Highlights every cell that belongs to a failing row, column or subgrid */
+static void apply_fail_highlight(void)
+{
+    for (int row = 0; row < SIZE; row++) {
+        for (int col = 0; col < SIZE; col++) {
+            int block = (row / 3) * 3 + (col / 3);
+
+            if (row_ok[row] && col_ok[col] && results[block + 2])
+                continue;
+
+            GtkWidget *entry = gtk_grid_get_child_at(
+                GTK_GRID(sudoku_grid), col, row
+            );
+
+            if (entry != NULL) {
+                gtk_style_context_add_class(
+                    gtk_widget_get_style_context(entry), "cell-fail"
+                );
+            }
+        }
+    }
+}
+
+/* Back to "not checked": old verdict, thread states and highlights are
+ * dropped, so the screen never shows a result for a different grid. */
+static void reset_result_view(void)
+{
+    reset_validation_state();
+    refresh_thread_panel();
+    clear_fail_highlight();
+    gtk_label_set_text(GTK_LABEL(result_label), "");
+    set_status("Үр дүн: Шалгаагүй", "neutral");
+}
+
+/* Any edit of any cell invalidates the previous result */
+static void on_cell_changed(
+    GtkEditable *editable,
+    gpointer user_data
+)
+{
+    (void)editable;
+    (void)user_data;
+
+    if (suppress_changed)
+        return;
+
+    reset_result_view();
+}
+
+/* "1, 4, 7" style list of failing indexes of ok[] */
+static void append_failing(GString *out, const int ok[SIZE])
+{
+    int first = 1;
+
+    for (int i = 0; i < SIZE; i++) {
+        if (!ok[i]) {
+            g_string_append_printf(out, first ? "%d" : ", %d", i + 1);
+            first = 0;
+        }
+    }
+}
+
 /* ---------- Callbacks ---------- */
 
 /* Enter дарахад дараагийн нүд рүү шилжинэ (мөр мөрөөр, сүүлийн нүднээс эхний нүд рүү) */
@@ -312,6 +464,13 @@ static void on_start_clicked(
     gtk_stack_set_visible_child_name(
         GTK_STACK(page_stack), "game"
     );
+
+    GtkWidget *first = gtk_grid_get_child_at(
+        GTK_GRID(sudoku_grid), 0, 0
+    );
+
+    if (first != NULL)
+        gtk_widget_grab_focus(first);
 }
 
 static void on_instructions_clicked(
@@ -335,7 +494,7 @@ static void on_check_clicked(
     (void)button;
     (void)user_data;
 
-    gtk_label_set_text(GTK_LABEL(result_label), "");
+    reset_result_view();
 
     for (int row = 0; row < SIZE; row++) {
         for (int col = 0; col < SIZE; col++) {
@@ -397,7 +556,13 @@ static void on_check_clicked(
 
     set_status("Sudoku-г шалгаж байна...", "neutral");
 
+    /* Let GTK draw the message before the (synchronous) check runs */
+    while (gtk_events_pending())
+        gtk_main_iteration();
+
     int validation = validate_sudoku();
+
+    refresh_thread_panel();
 
     if (validation == -1) {
         set_status(
@@ -419,14 +584,30 @@ static void on_check_clicked(
     GString *details = g_string_new("");
 
     g_string_append_printf(
-        details, "Мөрүүд: %s\n",
+        details, "Мөрүүд: %s",
         results[0] ? "PASS" : "FAIL"
     );
 
+    if (!results[0]) {
+        g_string_append(details, " (мөр ");
+        append_failing(details, row_ok);
+        g_string_append(details, ")");
+    }
+
+    g_string_append(details, "\n");
+
     g_string_append_printf(
-        details, "Баганууд: %s\n",
+        details, "Баганууд: %s",
         results[1] ? "PASS" : "FAIL"
     );
+
+    if (!results[1]) {
+        g_string_append(details, " (багана ");
+        append_failing(details, col_ok);
+        g_string_append(details, ")");
+    }
+
+    g_string_append(details, "\n");
 
     g_string_append(details, "3×3 дэд хүснэгтүүд:\n");
 
@@ -448,6 +629,9 @@ static void on_check_clicked(
     );
 
     g_string_free(details, TRUE);
+
+    if (validation == 0)
+        apply_fail_highlight();
 }
 
 static void on_clear_clicked(
@@ -457,6 +641,8 @@ static void on_clear_clicked(
 {
     (void)button;
     (void)user_data;
+
+    suppress_changed = TRUE;
 
     for (int row = 0; row < SIZE; row++) {
         for (int col = 0; col < SIZE; col++) {
@@ -470,8 +656,16 @@ static void on_clear_clicked(
         }
     }
 
-    set_status("Үр дүн: Шалгаагүй", "neutral");
-    gtk_label_set_text(GTK_LABEL(result_label), "");
+    suppress_changed = FALSE;
+
+    reset_result_view();
+
+    GtkWidget *first = gtk_grid_get_child_at(
+        GTK_GRID(sudoku_grid), 0, 0
+    );
+
+    if (first != NULL)
+        gtk_widget_grab_focus(first);
 }
 
 /* ---------- Instructions page ---------- */
@@ -535,14 +729,14 @@ static GtkWidget *create_instructions_content(void)
     gtk_container_set_border_width(GTK_CONTAINER(page), 24);
 
     GtkWidget *title = make_label(
-        "SUDOKU ТОГЛОХ ЗААВАР", NULL
+        "SUDOKU ШАЛГАХ ЗААВАР", NULL
     );
 
     gtk_widget_set_name(title, "welcome-title");
     gtk_label_set_xalign(GTK_LABEL(title), 0.5);
 
     GtkWidget *subtitle = make_label(
-        "Дүрэмтэй танилцаад тоглоомоо эхлүүлээрэй.",
+        "Дүрэмтэй танилцаад шалгалтаа эхлүүлээрэй.",
         NULL
     );
 
@@ -558,7 +752,7 @@ static GtkWidget *create_instructions_content(void)
     );
 
     GtkWidget *heading = make_label(
-        "ХЭРХЭН ТОГЛОХ ВЭ?", "section-heading"
+        "ХЭРХЭН АШИГЛАХ ВЭ?", "section-heading"
     );
 
     gtk_box_pack_start(
@@ -646,7 +840,7 @@ static GtkWidget *create_instructions_page(void)
     gtk_container_set_border_width(GTK_CONTAINER(footer), 12);
 
     GtkWidget *start_button = make_button(
-        "ТОГЛООМ ЭХЛЭХ", "primary-button"
+        "ШАЛГАЖ ЭХЛЭХ", "primary-button"
     );
 
     gtk_widget_set_halign(
@@ -757,6 +951,12 @@ static GtkWidget *create_game_page(void)
 
             gtk_style_context_add_class(ctx, class_name);
 
+            /* Засвар хийхэд хуучин дүн арилна */
+            g_signal_connect(
+                entry, "changed",
+                G_CALLBACK(on_cell_changed), NULL
+            );
+
             /* Enter дарахад дараагийн нүд рүү шилжинэ */
             g_signal_connect(
                 entry, "activate",
@@ -836,6 +1036,37 @@ static GtkWidget *create_game_page(void)
         GTK_BOX(page), result_label, FALSE, FALSE, 0
     );
 
+    /* 11 thread-ийн төлөвийн самбар */
+    GtkWidget *thread_frame =
+        gtk_frame_new("Үйлдлийн систем — Урсгалын ажиллагаа");
+
+    GtkWidget *thread_box =
+        gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+
+    gtk_container_set_border_width(GTK_CONTAINER(thread_box), 8);
+
+    for (int i = 0; i < TOTAL_THREADS; i++) {
+        thread_labels[i] = make_label("", "thread-line");
+
+        gtk_box_pack_start(
+            GTK_BOX(thread_box), thread_labels[i], FALSE, FALSE, 0
+        );
+    }
+
+    thread_time_label = make_label("", "thread-line");
+
+    gtk_box_pack_start(
+        GTK_BOX(thread_box), thread_time_label, FALSE, FALSE, 2
+    );
+
+    gtk_container_add(GTK_CONTAINER(thread_frame), thread_box);
+
+    gtk_box_pack_start(
+        GTK_BOX(page), thread_frame, FALSE, FALSE, 4
+    );
+
+    refresh_thread_panel();
+
     g_signal_connect(
         check_button, "clicked",
         G_CALLBACK(on_check_clicked), NULL
@@ -899,9 +1130,21 @@ int main(int argc, char *argv[])
         "instructions"
     );
 
+    GtkWidget *game_scroll = gtk_scrolled_window_new(NULL, NULL);
+
+    gtk_scrolled_window_set_policy(
+        GTK_SCROLLED_WINDOW(game_scroll),
+        GTK_POLICY_NEVER,
+        GTK_POLICY_AUTOMATIC
+    );
+
+    gtk_container_add(
+        GTK_CONTAINER(game_scroll), create_game_page()
+    );
+
     gtk_stack_add_named(
         GTK_STACK(page_stack),
-        create_game_page(),
+        game_scroll,
         "game"
     );
 
